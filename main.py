@@ -1,6 +1,12 @@
 import asyncio
 import logging
 import sys
+import subprocess
+import json
+
+from PostgreSQL import PostgreSQLDatabase
+from Redis import RedisClient
+from CouchDB import CouchDBClient
 
 from aiogram import Bot, Dispatcher, Router, types, F
 from aiogram.filters.callback_data import CallbackData
@@ -11,11 +17,12 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import Message
 from aiogram.utils.markdown import hbold
 
-#                          !!!WARNING!!!
-#                  DO NOT CREATE GLOBAL VARIABLES
-#                  ONLY FUNCTION-RANGE VARIABLES
-#                    THAT'S WHY SESSION DB EXISTS
 
+usersDB = PostgreSQLDatabase(db_name='users', db_user='postgres',
+                             db_password='postgres')  # IGNORE WARNING
+sessionDB = RedisClient()
+flightsDB = CouchDBClient()
+couchID: str
 
 TOKEN = "6629800772:AAEeqrsuFFs61bm36Brc7mA8SlP7UKu_5qU"
 router = Router()
@@ -25,6 +32,8 @@ dp.include_router(router=router)
 
 class Form(StatesGroup):
     login = State()
+    registration = State()
+    registed = State()
     success = State()
     dest1 = State()
     dest2 = State()
@@ -70,41 +79,68 @@ async def enter_new_number_handler(message: Message, state=FSMContext) -> None:
 async def share_phone_number_handler(message: Message, state: FSMContext) -> None:
     # message.contact.phone_number      # UNCOMMENT TO GET USER'S PHONE NUMBER
     # message.from_user.id              # UNCOMMENT TO GET USER'S TELEGRAM ID
-    # TODO: user base - stores phone numbers, passwords and field admin [TRUE OR FALSE], not editable from
-    #  the bot interface
-
-    # TODO: session base - fields: user_id (message.from_user.id [can be called everywhere]), phone number
-    #  (message.contact.phone_number [can be called only in this function]), departure prompt, arrival prompt.
-    #  It's not possible to get user's phone number in any time without creating global variables
-    #  (which are not allowed), so for matching current user and his login data with corresponding content of db's must
-    #  be used user_id as bridge between phone number and user's prompt.
-    #  I recommend to create get_phone(user_id: str) to build future requests easily.
 
     kb = [types.KeyboardButton(text="Відмінити❌")]
     keyboard = types.ReplyKeyboardMarkup(
         keyboard=[kb],
         resize_keyboard=True)
 
-    number_check = True  # TODO: if number exists (TRUE or FALSE)
-
-    if number_check is True:
+    number_check = usersDB.execute_read_query(
+        "SELECT EXISTS (SELECT 1 FROM users WHERE phone = '" + message.contact.phone_number + "')")
+    if number_check[0][0]:
+        # sessionDB.set(message.from_user.id, message.contact.phone_number)
+        sessionDB.set_hash(message.from_user.id, 'phone', message.contact.phone_number)
         await message.answer(reply_markup=keyboard, text="Введіть пароль:")
         await state.set_state(Form.login)
     else:
+        # sessionDB.set(message.from_user.id, message.contact.phone_number)
+        sessionDB.set_hash(message.from_user.id, 'phone', message.contact.phone_number)
+        usersDB.execute_query("INSERT INTO users (phone) VALUES ('" + message.contact.phone_number + "')")
         kb1 = [types.KeyboardButton(text="Повернутися назад◀️")]
         keyboard1 = types.ReplyKeyboardMarkup(
             keyboard=[kb1],
             resize_keyboard=True)
         await message.answer(reply_markup=keyboard1, text="Цей номер не зареєстрований❌")
+        await message.answer(reply_markup=keyboard1, text="Для реєстрації, придумайте пароль:")
+        await state.set_state(Form.registration)
+
+
+@router.message(Form.registration)
+async def registration_handler(message: Message, state: FSMContext):
+    print(message.text)
+    usersDB.execute_query(
+        "UPDATE users SET password = '" + message.text + "' WHERE phone = '" + sessionDB.get_hash(message.from_user.id,
+                                                                                                  'phone') + "'")
+    await state.clear()
+    kb1 = [types.KeyboardButton(text="Продовжити▶️")]
+    keyboard1 = types.ReplyKeyboardMarkup(
+        keyboard=[kb1],
+        resize_keyboard=True)
+    await message.answer(reply_markup=keyboard1, text=f"Пароль {message.text} збережений")
+
+
+@router.message(F.text == "Продовжити▶️")
+async def continue_handler(message: Message):
+    kb1 = [types.KeyboardButton(text="Шукати квитки🔍"), types.KeyboardButton(text="Мій квиток🎫")]
+    keyboard1 = types.ReplyKeyboardMarkup(
+        keyboard=[kb1],
+        resize_keyboard=True)
+    await message.answer(reply_markup=keyboard1, text="✅Реєстрація виконана!")
 
 
 @router.message(Form.login)
 async def login_handler(message: Message, state: FSMContext) -> None:
-    password_check = True  # TODO: check password and check if user is admin
-    admin_check = True
+    print(message.text)
+    password_check = usersDB.execute_read_query(
+        "SELECT EXISTS (SELECT 1 FROM users WHERE password = '" + message.text + "' AND phone = '" + sessionDB.get_hash(
+            message.from_user.id,
+            'phone') + "')")
+    admin_check = usersDB.execute_read_query(
+        "SELECT EXISTS (SELECT 1 FROM users WHERE is_admin = 't' AND phone = '" + sessionDB.get_hash(
+            message.from_user.id, 'phone') + "')")
 
-    if password_check:
-        if admin_check:
+    if password_check[0][0]:
+        if admin_check[0][0]:
             kb1 = [types.KeyboardButton(text="Шукати квитки за номером користувача🔍")]
             keyboard1 = types.ReplyKeyboardMarkup(
                 keyboard=[kb1],
@@ -112,7 +148,7 @@ async def login_handler(message: Message, state: FSMContext) -> None:
             await message.answer("✅Вхід виконаний", reply_markup=keyboard1)
             await state.clear()
         else:
-            kb1 = [types.KeyboardButton(text="Шукати квитки🔍"), types.KeyboardButton(text="Мої квитки🎫")]
+            kb1 = [types.KeyboardButton(text="Шукати квитки🔍"), types.KeyboardButton(text="Мій квиток🎫")]
             keyboard1 = types.ReplyKeyboardMarkup(
                 keyboard=[kb1],
                 resize_keyboard=True)
@@ -123,44 +159,65 @@ async def login_handler(message: Message, state: FSMContext) -> None:
         keyboard = types.ReplyKeyboardMarkup(
             keyboard=[kb],
             resize_keyboard=True)
-        await message.answer("Пароль неправильний❌.")
+        await state.clear()
+        await message.answer("Пароль неправильний❌")
         await message.answer("Введіть пароль ще раз:", reply_markup=keyboard)
+        await state.set_state(Form.login)
 
 
 @router.message(F.text == "Шукати квитки🔍")
 async def search_for_tickets_handler(message: Message, state: FSMContext) -> None:
+    kb = [types.KeyboardButton(text="Шукати квитки🔍"), types.KeyboardButton(text="Мій квиток🎫")]
+    keyboard = types.ReplyKeyboardMarkup(
+        keyboard=[kb],
+        resize_keyboard=True)
     await state.set_state(Form.dest1)
-    await message.answer("Введіть пункт відправлення:")
+    await message.answer("Введіть пункт відправлення:", reply_markup=keyboard)
 
 
 @router.message(Form.dest1)
 async def dep_point_handler(message: Message, state: FSMContext) -> None:
+    kb = [types.KeyboardButton(text="Шукати квитки🔍"), types.KeyboardButton(text="Мій квиток🎫")]
+    keyboard = types.ReplyKeyboardMarkup(
+        keyboard=[kb],
+        resize_keyboard=True)
     await state.set_state(Form.dest2)
-    await message.answer("Введіть пункт призначення:")
+    await message.answer("Введіть пункт призначення:", reply_markup=keyboard)
 
-    # message.text            # departure prompt
-    # message.from_user.id    # user's id
-    # TODO: add DEP (departure) to session table (not arrival here, not a mistake)
+    sessionDB.set_hash(message.from_user.id, 'data', message.text)
 
+
+def find_flights(departure, arrival, json_data):
+    matching_flights = []
+    data = json.dumps(json_data, indent=4)
+    for flight in data['flights']:
+        if flight["departure"] == departure and flight["arrival"] == arrival:
+            matching_flights.append(flight)
+
+    return matching_flights
 
 @router.message(Form.dest2)
 async def search_handler(message: Message, state: FSMContext) -> None:
     await message.answer("🔍Шукаємо квитки...")
-
-    # message.text            # departure prompt
-    # message.from_user.id    # user's id
-    # TODO: add ARR (arrival) to session table
-
-    # TODO: flights db request by dep, arr from session table with matching parameters
-    result = "квитки"
-    if result != None:
+    departure = sessionDB.get_hash(message.from_user.id, 'data')
+    result = [flight for flight in flightsDB.get_document('flights', couchID)['flights'] if flight['departure'] == departure and flight['arrival'] == message.text]
+    sessionDB.set_hash(message.from_user.id, 'data1', message.text)
+    if result != []:
         kb = [types.KeyboardButton(text="Обрати квиток✈️"), types.KeyboardButton(text="Шукати квитки🔍")]
         keyboard = types.ReplyKeyboardMarkup(
             keyboard=[kb],
             resize_keyboard=True)
-        await message.answer(f"Доступні квитки: \n{result}", reply_markup=keyboard)
+
+
+        await message.answer(f"Доступні квитки:")
+        for i in range(0, len(result)):
+            result_to_print = str(
+                str(result[i]['departure']) + " -> " + str(
+                    result[i]['arrival']) + " || " + str(
+                    result[i]['departure_time']) + " -> " + str(result[i]['arrival_time']))
+            await message.answer(f"{i+1}) {result_to_print}", reply_markup=keyboard)
     else:
-        kb1 = [types.KeyboardButton(text="Шукати квитки🔍"), types.KeyboardButton(text="Мої квитки🎫")]
+        kb1 = [types.KeyboardButton(text="Шукати квитки🔍"), types.KeyboardButton(text="Мій квиток🎫")]
         keyboard1 = types.ReplyKeyboardMarkup(
             keyboard=[kb1],
             resize_keyboard=True)
@@ -170,7 +227,7 @@ async def search_handler(message: Message, state: FSMContext) -> None:
 
 @router.message(F.text == "Обрати квиток✈️")
 async def search_for_tickets_handler(message: Message, state: FSMContext) -> None:
-    kb1 = [types.KeyboardButton(text="Шукати квитки🔍"), types.KeyboardButton(text="Мої квитки🎫")]
+    kb1 = [types.KeyboardButton(text="Шукати квитки🔍"), types.KeyboardButton(text="Мій квиток🎫")]
     keyboard1 = types.ReplyKeyboardMarkup(
         keyboard=[kb1],
         resize_keyboard=True)
@@ -181,48 +238,60 @@ async def search_for_tickets_handler(message: Message, state: FSMContext) -> Non
 @router.message(Form.select)
 async def select_tickets_handler(message: Message, state: FSMContext) -> None:
     global message_to_int
-    kb = [types.KeyboardButton(text="Шукати квитки🔍"), types.KeyboardButton(text="Мої квитки🎫")]
+    kb = [types.KeyboardButton(text="Шукати квитки🔍"), types.KeyboardButton(text="Мій квиток🎫")]
     keyboard = types.ReplyKeyboardMarkup(
         keyboard=[kb],
         resize_keyboard=True)
 
-    available_tickets_amount = 5
-    # TODO: get_available_tickets_amount() (independent but kinda similar to request from search_handler function)
+    tickets = [flight for flight in flightsDB.get_document('flights', couchID)['flights'] if flight['departure'] == sessionDB.get_hash(message.from_user.id, 'data') and flight['arrival'] == sessionDB.get_hash(message.from_user.id, 'data1')]
 
     try:
         message_to_int = int(message.text)
-        if message_to_int in range(1, available_tickets_amount + 1):
-            # TODO: write selected by sequence number ticket into the user tickets db
-            await message.answer(f"✅Білет {message.text} заброньований.", reply_markup=keyboard)
+        if message_to_int not in range(1,len(tickets)+1):
+            await message.answer(f"❌Виберіть квиток, ввівши число від 1 до {len(tickets)}", reply_markup=keyboard)
         else:
-            await message.answer("❌Недопустиме значення!")
-        await state.clear()
-    except:
-        await message.answer("❌Обрана позиція повинна бути числом.", reply_markup=keyboard)
-        await state.clear()
+            selected_ticket = tickets[int(message.text)-1]
+            print(selected_ticket)
+
+            #query_string_1 = str("Місце відправлення: " + str(selected_ticket['departure'])+ "\nМісце прибуття: "+ str(selected_ticket['arrival']) +"\nЧас відправлення: "+ str(selected_ticket['departure_time']) +"\nЧас прибуття: "+ str(selected_ticket['arrival_time']))
+            query_string_1 = str(
+                str(selected_ticket['departure']) + " -> " + str(
+                    selected_ticket['arrival']) + " || " + str(
+                    selected_ticket['departure_time']) + " -> " + str(selected_ticket['arrival_time']))
+            print(query_string_1)
+            query_string_2 = str(sessionDB.get_hash(message.from_user.id, 'phone'))
+            print(query_string_2)
+            usersDB.execute_query("UPDATE users SET tickets = '"+query_string_1+"' WHERE phone = '" + query_string_2 + "'")
+
+            await message.answer(f"Ваш квиток: \n{str(query_string_1)}", reply_markup=keyboard)
+            await state.clear()
+
+    except Exception as e:
+        print(e)
+        await message.answer(f"❌Сталася помилка", reply_markup=keyboard)
 
 
-@router.message(F.text == "Мої квитки🎫")
+
+@router.message(F.text == "Мій квиток🎫")
 async def search_for_user_tickets_handler(message: Message) -> None:
-    tickets_str = "квитки"
-    # TODO: ask session db by user's id to get user's phone number,
-    #  then ask tickets_db to get booked tickets by user's phone number. Set up simple parser to return a list which
-    #  will be displayed to the user. Leave empty str if there are no matches.
+    query_string_2 = str(sessionDB.get_hash(message.from_user.id, 'phone'))
+    tickets_str = manipulate_string(str(usersDB.execute_read_query("SELECT tickets FROM users WHERE phone = '"+query_string_2+"'")))
 
-
-    kb = [types.KeyboardButton(text="Обрати квиток✈️"), types.KeyboardButton(text="Шукати квитки🔍")]
+    kb = [types.KeyboardButton(text="Шукати квитки🔍"), types.KeyboardButton(text="Мій квиток🎫")]
     keyboard = types.ReplyKeyboardMarkup(
         keyboard=[kb],
         resize_keyboard=True)
     if tickets_str != "":
-        await message.answer(f"🎫Заброньовані квитки:\n{tickets_str}", reply_markup=keyboard)
+        await message.answer(f"🎫Заброньований квиток:\n{tickets_str}", reply_markup=keyboard)
     else:
         await message.answer(f"🎫У вас ще нема заброньованих квитків.", reply_markup=keyboard)
+
 
 @router.message(F.text == "Шукати квитки за номером користувача🔍")
 async def admin_search_for_user_tickets_handler(message: Message, state: FSMContext) -> None:
     await message.answer("Введіть повний номер телефону (+380...):")
     await state.set_state(Form.admin_search)
+
 
 @router.message(Form.admin_search)
 async def admin_search_handler(message: Message, state: FSMContext) -> None:
@@ -232,16 +301,19 @@ async def admin_search_handler(message: Message, state: FSMContext) -> None:
         keyboard=[kb],
         resize_keyboard=True)
 
-    search_result = ""
-
-    # TODO: literally request from search_for_user_tickets_handler function, idk how to implement
-    #  neo4j in here. Don't know don't care
+    search_result =  manipulate_string(usersDB.execute_read_query("SELECT tickets FROM users WHERE phone = '"+message.text+"'"))
 
     if search_result == "":
         search_result = "❌Нема даних"
     await message.answer(f"Пошук виконано:\n{search_result}", reply_markup=keyboard)
 
 
+def manipulate_string(input_string):
+    if len(input_string) >= 7:
+        modified_string = input_string[3:-4]
+        return modified_string
+    else:
+        return "String is too short"
 
 async def main() -> None:
     bot = Bot(TOKEN, parse_mode=ParseMode.HTML)
@@ -249,5 +321,14 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    subprocess.run("docker compose up -d", shell=True)
+
+    usersDB.connect()
+    flightsDB.create_database(db_name='flights')
+
+    couchID = flightsDB.push_example_data(db_name='flights')
+
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
     asyncio.run(main())
+
+

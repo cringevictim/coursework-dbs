@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:latest
+    restart: always
+    environment:
+      POSTGRES_DB: users
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+  
+  redis:
+    image: redis:latest
+    restart: always
+    ports:
+      - "6379:6379"
+
+  couchdb:
+    image: couchdb:latest
+    restart: always
+    environment:
+      COUCHDB_USER: couchdb
+      COUCHDB_PASSWORD: couchdb
+    ports:
+      - "5984:5984"
+    volumes:
+      - couchdb_data:/opt/couchdb/data
+
+volumes:
+  postgres_data:
+  couchdb_data:
