@@ -1,8 +1,8 @@
 import requests
-import json
+
 
 class CouchDBClient:
-    def __init__(self, base_url='http://localhost:5984', username='couchdb', password='couchdb'):
+    def __init__(self, base_url='http://couchdb:5984', username='couchdb', password='couchdb'):
         self.base_url = base_url
         self.session = requests.Session()
         self.session.auth = (username, password)
@@ -14,6 +14,15 @@ class CouchDBClient:
     def delete_database(self, db_name):
         response = self.session.delete(f"{self.base_url}/{db_name}")
         return response.json()
+
+    def clear_database(self, db_name):
+        response = self.session.get(f"{self.base_url}/{db_name}/_all_docs")
+        doc_ids = response.json().get("rows", [])
+
+        for row in doc_ids:
+            doc_id = row.get("id")
+            rev = row.get("value").get("rev")
+            self.delete_document(db_name, doc_id, rev)
 
     def create_document(self, db_name, document):
         response = self.session.post(f"{self.base_url}/{db_name}", json=document)
@@ -30,7 +39,7 @@ class CouchDBClient:
     def delete_document(self, db_name, doc_id, rev):
         response = self.session.delete(f"{self.base_url}/{db_name}/{doc_id}", params={"rev": rev})
         return response.json()
-    
+
     def push_example_data(self, db_name):
         flights = {
             "flights": [
@@ -102,4 +111,3 @@ class CouchDBClient:
         }
 
         return self.create_document(db_name, flights)['id']
-
